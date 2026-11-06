@@ -1,0 +1,14 @@
+{layout '@layout.latte'}
+
+{block content}
+<div class="container">
+    <h1 n:block="title">Welcome to Latte</h1>
+
+    <ul n:if="$items">
+        <li n:foreach="$items as $item">
+            {$item->title|upper}
+        </li>
+    </ul>
+    <p n:else>No items found.</p>
+</div>
+{/block}

@@ -1,0 +1,5 @@
+target/
+tools/signer/target/
+*.key
+*.oiplugin
+.DS_Store

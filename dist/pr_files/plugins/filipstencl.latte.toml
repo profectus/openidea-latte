@@ -1,0 +1,6 @@
+repository = "https://github.com/filipstencl/openidea-latte"
+
+[[versions]]
+version = "0.1.0"
+package = "https://github.com/filipstencl/openidea-latte/releases/download/v0.1.0/filipstencl.latte-0.1.0.oiplugin"
+sha256 = "8b89255fa70b8238837854378c8c12be7d17cc2b6d5b427fb117c10b7ad0da14"

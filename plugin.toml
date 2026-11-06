@@ -1,0 +1,32 @@
+id = "profectus.latte"
+name = "Latte"
+version = "0.1.0"
+description = "Latte template support for Nette: syntax highlighting, tags, n:attributes, autocomplete/completion, structure view outline, code folding and file icons."
+authors = ["Filip Stencl", "OpenIDEA Community"]
+license = "MIT"
+change-notes = "0.1.0 — first release: .latte file detection, autocomplete/completion for conditions, tags, n:attributes, filters and variables, syntax highlighting, structure view outline, code folding, and file icons."
+categories = ["languages", "frameworks"]
+icon = "icon.svg"
+icon-dark = "icon_dark.svg"
+engines.openidea = "^1.2"
+wasm = "dist/plugin.wasm"
+activation = ["on-language:latte"]
+
+[[contributes.languages]]
+path = "languages/latte.toml"
+
+[[contributes.providers]]
+kinds = ["completion"]
+languages = ["latte"]
+
+[[contributes.fileIcons]]
+id = "latte"
+patterns = ["*.latte"]
+icon = "icons/latte.svg"
+iconDark = "icons/latte_dark.svg"
+
+[[contributes.fileTemplates]]
+id = "latte-template"
+name = "Latte Template"
+extension = "latte"
+path = "templates/template.latte"

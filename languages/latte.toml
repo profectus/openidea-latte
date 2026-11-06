@@ -1,0 +1,7 @@
+id = "latte"
+name = "Latte"
+extensions = ["latte"]
+line-comment = "{*"
+block-comment = ["{*", "*}"]
+indent = { tab-size = 4, insert-spaces = true }
+ui-mode = "HTML"

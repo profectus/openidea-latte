@@ -24,6 +24,11 @@ path = "languages/latte.toml"
 kinds = ["completion", "definition", "line-markers"]
 languages = ["latte"]
 
+# Nette presenters: gutter icons from render<X>() / action<X>() to the template.
+[[contributes.providers]]
+kinds = ["line-markers"]
+languages = ["php"]
+
 [[contributes.fileIcons]]
 id = "latte"
 patterns = ["*.latte"]

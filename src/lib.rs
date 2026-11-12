@@ -5,6 +5,7 @@ mod completion;
 mod folding;
 mod lexer;
 mod navigation;
+mod nette;
 mod outline;
 
 use navigation::{Files, ProjectFiles};
@@ -51,13 +52,22 @@ impl Providers for Latte {
     }
 
     fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        if doc.language != "latte" {
+            return Vec::new();
+        }
         let files = ProjectFiles::for_path(&doc.path);
         navigation::definition(files.as_ref().map(|f| f as &dyn Files), doc, at)
     }
 
     fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
         let files = ProjectFiles::for_path(&doc.path);
-        navigation::line_markers(files.as_ref().map(|f| f as &dyn Files), doc)
+        let files = files.as_ref().map(|f| f as &dyn Files);
+        match doc.language.as_str() {
+            "latte" => navigation::line_markers(files, doc),
+            // Presenters: from render<X>() / action<X>() to their templates.
+            "php" => files.map(|f| nette::presenter_markers(f, doc)).unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 }
 

@@ -23,6 +23,11 @@ Latte is the template engine of the Nette Framework for PHP, known for its stric
   - Blocks in `{include name}`, `{include #name}`, `{include block name}` and `{ifset #name}` — looked up in the template, its `{import}`s and its layout chain.
   - Gutter icons: jump to the layout / imported templates, and from a `{block}` to the block of the layout it overrides.
   - Needs the optional `project.read` capability for other files; without it, only blocks of the current template resolve.
+- **Nette navigation** (following `Presenter::formatTemplateFiles()` / `formatLayoutTemplateFiles()` of Nette 3.2 — templates next to presenters as well as `templates/<Presenter>/<view>.latte` and `templates/<Presenter>.<view>.latte`):
+  - `{link}`, `{plink}` and `n:href` → `action<X>()` / `render<X>()` of the presenter (`Product:show`, `:Admin:Product:`, `edit`), signals `logout!` → `handle<X>()`, also inherited from a base presenter.
+  - `{control}`, `{form}` and `<form n:name>` → `createComponent<X>()` of the presenter (or of a PHP class next to a component template).
+  - Gutter icon on line 1 of a view template → its `render<X>()` / `action<X>()`; in a presenter, gutter icons on `render<X>()` / `action<X>()` → the template.
+  - The automatic `@layout.latte` of a presenter template counts as its layout (blocks overriding it get a gutter icon, `{include}` finds its blocks).
 - **Code Folding**:
   - Fold block tags (`{block}...{/block}`, `{snippet}...{/snippet}`, `{if}...{/if}`, etc.).
   - Fold multi-line comments (`{* ... *}`, `<!-- ... -->`).

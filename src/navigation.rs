@@ -11,6 +11,7 @@
 //! Parsing works on byte offsets; [`openidea_plugin::text`] converts them to
 //! editor positions (UTF-16 columns).
 
+use crate::nette;
 use openidea_plugin::providers::{Document, LineMarker};
 use openidea_plugin::text;
 use openidea_plugin::{Location, Position, Project, Range};
@@ -29,6 +30,10 @@ pub enum Target {
     File(String),
     /// A block, optionally looked up in another template (`from 'file'`).
     Block { name: String, from: Option<String> },
+    /// A Nette link destination: `Product:show`, `:Admin:Home:`, `signal!`.
+    Link(String),
+    /// A component of the presenter: `{control name}`, `{form name}`, `<form n:name>`.
+    Component(String),
 }
 
 /// Something in a template that points elsewhere; `span` is what the user
@@ -55,6 +60,8 @@ pub struct Template {
     pub parent: Option<String>,
     /// `{import}` targets.
     pub imports: Vec<String>,
+    /// `{layout none}`: no automatic layout either.
+    pub layout_disabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,15 +81,71 @@ fn is_name_byte(b: u8) -> bool {
 /// Parses the references and block definitions of a template.
 pub fn parse(text: &str) -> Template {
     let mut t = Template::default();
-    for tag in scan(text, &mut t.blocks) {
+    for tag in scan(text, &mut t) {
         parse_tag(text, &tag, &mut t);
     }
     t
 }
 
+/// `n:` attributes that name something: `n:block`, `n:href`, `n:name` (of a `<form>`).
+const N_ATTRS: &[&str] = &["n:block", "n:href", "n:name"];
+
+/// The value span of an HTML attribute value starting at `at` (after `=`):
+/// quoted, or bare up to whitespace or `>`. Returns (value, where to resume).
+fn attr_value(bytes: &[u8], at: usize) -> Option<(Span<usize>, usize)> {
+    let &first = bytes.get(at)?;
+    if first == b'"' || first == b'\'' {
+        let start = at + 1;
+        let end = bytes[start..].iter().position(|b| *b == first).map_or(bytes.len(), |p| start + p);
+        return Some((start..end, (end + 1).min(bytes.len())));
+    }
+    let end = at + bytes[at..].iter().take_while(|b| !b.is_ascii_whitespace() && **b != b'>').count();
+    (end > at).then_some((at..end, end))
+}
+
+/// Is the attribute at `at` on a `<form>` element?
+fn in_form_tag(text: &str, at: usize) -> bool {
+    text[..at].rfind('<').is_some_and(|lt| {
+        let tag = &text[lt + 1..at];
+        tag.len() > 4 && tag[..4].eq_ignore_ascii_case("form") && tag.as_bytes()[4].is_ascii_whitespace() && !tag.contains('>')
+    })
+}
+
+/// An `n:` attribute at `i`: records what it names, returns where to resume.
+fn n_attr(text: &str, i: usize, t: &mut Template) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if i == 0 || !bytes[i - 1].is_ascii_whitespace() {
+        return None;
+    }
+    let attr = N_ATTRS.iter().find(|a| bytes[i..].starts_with(a.as_bytes()) && bytes.get(i + a.len()) == Some(&b'='))?;
+    let (value, resume) = attr_value(bytes, i + attr.len() + 1)?;
+    match *attr {
+        "n:block" => t.blocks.extend(block_def(text, value)),
+        "n:href" => {
+            if let Some(arg) = next_arg(text, value.start, value.end)
+                && is_static(&text[arg.span.clone()])
+            {
+                let dest = text[arg.span.clone()].to_owned();
+                t.refs.push(Reference { tag: "n:href".into(), target: Target::Link(dest), span: arg.span });
+            }
+        }
+        _ if in_form_tag(text, i) => {
+            if let Some(arg) = next_arg(text, value.start, value.end)
+                && is_static(&text[arg.span.clone()])
+            {
+                let name = text[arg.span.clone()].to_owned();
+                t.refs.push(Reference { tag: "n:name".into(), target: Target::Component(name), span: arg.span });
+            }
+        }
+        _ => {}
+    }
+    Some(resume)
+}
+
 /// Latte tags of `text` in order, skipping comments and `{syntax off}`
-/// regions. `n:block` attributes found in between go to `blocks`.
-fn scan(text: &str, blocks: &mut Vec<BlockDef>) -> Vec<RawTag> {
+/// regions. Block definitions and `n:` attributes found on the way go
+/// straight to `t`.
+fn scan(text: &str, t: &mut Template) -> Vec<RawTag> {
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut tags = Vec::new();
@@ -97,18 +160,10 @@ fn scan(text: &str, blocks: &mut Vec<BlockDef>) -> Vec<RawTag> {
             i = text[i + 4..].find("-->").map_or(len, |p| i + 4 + p + 3);
             continue;
         }
-        if bytes[i..].starts_with(b"n:block=")
-            && i > 0
-            && bytes[i - 1].is_ascii_whitespace()
-            && let Some(&q) = bytes.get(i + 8)
-            && (q == b'"' || q == b'\'')
+        if bytes[i..].starts_with(b"n:")
+            && let Some(resume) = n_attr(text, i, t)
         {
-            let start = i + 9;
-            let end = text[start..].find(q as char).map_or(len, |p| start + p);
-            if let Some(def) = block_def(text, start..end) {
-                blocks.push(def);
-            }
-            i = (end + 1).min(len);
+            i = resume;
             continue;
         }
         if bytes[i] == b'{' && i + 1 < len && !bytes[i + 1].is_ascii_whitespace() && bytes[i + 1] != b'{' {
@@ -130,7 +185,7 @@ fn scan(text: &str, blocks: &mut Vec<BlockDef>) -> Vec<RawTag> {
             if matches!(tag.name.as_str(), "block" | "define")
                 && let Some(def) = block_def(text, tag.args.clone())
             {
-                blocks.push(def);
+                t.blocks.push(def);
             }
             tags.push(tag);
             continue;
@@ -234,7 +289,10 @@ fn parse_tag(text: &str, tag: &RawTag, t: &mut Template) {
 
     match tag.name.as_str() {
         name if FILE_TAGS.contains(&name) => {
-            if !is_static(first_text) || (!first.quoted && matches!(first_text, "auto" | "none")) {
+            if matches!(name, "layout" | "extends") && !first.quoted && matches!(first_text, "none" | "false") {
+                t.layout_disabled = true;
+            }
+            if !is_static(first_text) || (!first.quoted && matches!(first_text, "auto" | "none" | "false")) {
                 return;
             }
             let path = first_text.to_owned();
@@ -298,6 +356,16 @@ fn parse_tag(text: &str, tag: &RawTag, t: &mut Template) {
                 push(Target::Block { name: name.to_owned(), from: None }, span);
             }
         }
+        "link" | "plink" => {
+            if is_static(first_text) {
+                push(Target::Link(first_text.to_owned()), first.span);
+            }
+        }
+        "control" | "form" | "formPrint" | "formClassPrint" => {
+            if is_static(first_text) {
+                push(Target::Component(first_text.to_owned()), first.span);
+            }
+        }
         _ => {}
     }
 }
@@ -310,40 +378,65 @@ fn parse_tag(text: &str, tag: &RawTag, t: &mut Template) {
 pub trait Files {
     /// The text of the file at the absolute `path`.
     fn read(&self, path: &str) -> Option<String>;
-    /// The absolute path of some project file whose path ends with `suffix`.
-    fn find(&self, suffix: &str) -> Option<String>;
+    /// Absolute paths of project files matching `glob` (relative to the
+    /// project root, `**` for any directories), at most `limit`.
+    fn glob(&self, glob: &str, limit: u32) -> Vec<String>;
+    /// The project root: absolute, `/` separators, no trailing `/`.
+    fn root(&self) -> &str;
+
+    fn exists(&self, path: &str) -> bool {
+        self.read(path).is_some()
+    }
+
+    /// `path` relative to the root (`""` for the root itself), if inside it.
+    fn relative(&self, path: &str) -> Option<String> {
+        let path = normalize(path);
+        let root = self.root();
+        if path == root {
+            return Some(String::new());
+        }
+        path.strip_prefix(root)?.strip_prefix('/').map(str::to_owned)
+    }
 }
 
 /// The host project containing `path`.
-pub struct ProjectFiles(Project);
+pub struct ProjectFiles {
+    project: Project,
+    root: String,
+}
 
 impl ProjectFiles {
     pub fn for_path(path: &str) -> Option<Self> {
-        let path = path.replace('\\', "/");
+        let path = normalize(path);
         openidea_plugin::host::projects()
             .ok()?
             .into_iter()
-            .filter_map(|p| {
-                let root = p.root().ok()?.replace('\\', "/");
-                path.starts_with(root.trim_end_matches('/')).then_some((root.len(), p))
+            .filter_map(|project| {
+                let root = normalize(&project.root().ok()?);
+                let root = root.trim_end_matches('/').to_owned();
+                let inside = path == root || path.starts_with(&format!("{root}/"));
+                inside.then_some(Self { project, root })
             })
-            .max_by_key(|(len, _)| *len)
-            .map(|(_, p)| Self(p))
+            .max_by_key(|f| f.root.len())
     }
 }
 
 impl Files for ProjectFiles {
     fn read(&self, path: &str) -> Option<String> {
-        self.0.read_file(path).ok()
+        self.project.read_file(path).ok()
     }
 
-    fn find(&self, suffix: &str) -> Option<String> {
-        self.0.find_files(&format!("**/{suffix}"), 1).ok()?.into_iter().next()
+    fn glob(&self, glob: &str, limit: u32) -> Vec<String> {
+        self.project.find_files(glob, limit).unwrap_or_default()
+    }
+
+    fn root(&self) -> &str {
+        &self.root
     }
 }
 
 /// `path` with `.` and `..` segments resolved and `/` separators.
-fn normalize(path: &str) -> String {
+pub(crate) fn normalize(path: &str) -> String {
     let path = path.replace('\\', "/");
     let absolute = path.starts_with('/');
     let mut parts: Vec<&str> = Vec::new();
@@ -364,12 +457,17 @@ fn normalize(path: &str) -> String {
     if absolute { format!("/{joined}") } else { joined }
 }
 
-fn dir_of(path: &str) -> &str {
+pub(crate) fn dir_of(path: &str) -> &str {
     path.rfind(['/', '\\']).map_or("", |i| &path[..i])
 }
 
-fn file_name(path: &str) -> &str {
+pub(crate) fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// `dir/name`, or `name` in the root (`dir` empty).
+pub(crate) fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() { name.to_owned() } else { format!("{dir}/{name}") }
 }
 
 /// Is `path` absolute (`/x`, `C:/x`, `C:\x`)?
@@ -398,7 +496,7 @@ pub fn resolve_file(files: &dyn Files, from: &str, written: &str) -> Option<(Str
     if suffix.is_empty() {
         return None;
     }
-    let path = files.find(&suffix.join("/"))?;
+    let path = files.glob(&format!("**/{}", suffix.join("/")), 1).into_iter().next()?;
     let text = files.read(&path)?;
     Some((path, text))
 }
@@ -416,19 +514,35 @@ fn load(files: &dyn Files, from: &str, written: &str) -> Option<Loaded> {
     Some(Loaded { path, text, template })
 }
 
-fn location(path: &str, text: &str, span: &Span<usize>) -> Location {
+pub(crate) fn location(path: &str, text: &str, span: &Span<usize>) -> Location {
     Location {
         path: path.to_owned(),
         range: Range::new(text::position(text, span.start), text::position(text, span.end)),
     }
 }
 
-/// Where the block `name` is defined for a template: its imports, then its
-/// layout chain (each with its imports). The template itself is not included.
+/// Templates a template inherits blocks from, as written: its `{import}`s
+/// and its `{layout}` / `{extends}`.
+fn explicit_ancestors(template: &Template) -> Vec<String> {
+    template.imports.iter().chain(template.parent.iter()).cloned().collect()
+}
+
+/// Like [`explicit_ancestors`], plus the layout Nette picks for a presenter
+/// template that names none (as an absolute path).
+fn ancestors(files: &dyn Files, path: &str, template: &Template) -> Vec<String> {
+    let mut list = explicit_ancestors(template);
+    if let Some(layout) = nette::auto_layout(files, path, template) {
+        list.push(layout);
+    }
+    list
+}
+
+/// Where the block `name` is defined in the templates `related` (written
+/// in the template at `path`) or the ones they inherit from in turn.
 fn block_in_ancestors(
     files: &dyn Files,
     path: &str,
-    template: &Template,
+    related: &[String],
     name: &str,
     seen: &mut HashSet<String>,
     depth: usize,
@@ -436,16 +550,16 @@ fn block_in_ancestors(
     if depth > MAX_DEPTH {
         return None;
     }
-    let related = template.imports.iter().chain(template.parent.iter());
     for written in related {
         let Some(other) = load(files, path, written) else { continue };
-        if !seen.insert(other.path.clone()) {
+        if !seen.insert(normalize(&other.path)) {
             continue;
         }
         if let Some(def) = other.template.blocks.iter().find(|b| b.name == name) {
             return Some(location(&other.path, &other.text, &def.span));
         }
-        if let Some(found) = block_in_ancestors(files, &other.path, &other.template, name, seen, depth + 1) {
+        let next = explicit_ancestors(&other.template);
+        if let Some(found) = block_in_ancestors(files, &other.path, &next, name, seen, depth + 1) {
             return Some(found);
         }
     }
@@ -462,8 +576,9 @@ fn find_block(files: Option<&dyn Files>, doc: &Document, template: &Template, na
     if let Some(def) = template.blocks.iter().find(|b| b.name == name) {
         return Some(location(&doc.path, &doc.text, &def.span));
     }
+    let files = files?;
     let mut seen = HashSet::from([normalize(&doc.path)]);
-    block_in_ancestors(files?, &doc.path, template, name, &mut seen, 0)
+    block_in_ancestors(files, &doc.path, &ancestors(files, &doc.path, template), name, &mut seen, 0)
 }
 
 fn target_of(files: Option<&dyn Files>, doc: &Document, template: &Template, r: &Reference) -> Option<Location> {
@@ -473,6 +588,8 @@ fn target_of(files: Option<&dyn Files>, doc: &Document, template: &Template, r: 
             Some(Location { path, range: Range::default() })
         }
         Target::Block { name, from } => find_block(files, doc, template, name, from.as_deref()),
+        Target::Link(dest) => nette::link_target(files?, &doc.path, dest),
+        Target::Component(name) => nette::component_target(files?, &doc.path, name),
     }
 }
 
@@ -493,8 +610,8 @@ pub fn definition(files: Option<&dyn Files>, doc: &Document, at: Position) -> Ve
         .collect()
 }
 
-/// Gutter markers: the layout and imported templates, and blocks that
-/// override a block of the layout chain.
+/// Gutter markers: the presenter (line 1), the layout and imported
+/// templates, and blocks that override a block of the layout chain.
 pub fn line_markers(files: Option<&dyn Files>, doc: &Document) -> Vec<LineMarker> {
     let Some(files) = files else { return Vec::new() };
     let template = parse(&doc.text);
@@ -504,6 +621,10 @@ pub fn line_markers(files: Option<&dyn Files>, doc: &Document) -> Vec<LineMarker
             markers.push(marker);
         }
     };
+
+    if let Some(marker) = nette::template_presenter_marker(files, &doc.path) {
+        push(&mut markers, marker);
+    }
 
     for r in &template.refs {
         let Target::File(written) = &r.target else { continue };
@@ -520,10 +641,11 @@ pub fn line_markers(files: Option<&dyn Files>, doc: &Document) -> Vec<LineMarker
         push(&mut markers, marker);
     }
 
-    if template.parent.is_some() || !template.imports.is_empty() {
+    let related = ancestors(files, &doc.path, &template);
+    if !related.is_empty() {
         for def in &template.blocks {
             let mut seen = HashSet::from([normalize(&doc.path)]);
-            let Some(target) = block_in_ancestors(files, &doc.path, &template, &def.name, &mut seen, 0) else {
+            let Some(target) = block_in_ancestors(files, &doc.path, &related, &def.name, &mut seen, 0) else {
                 continue;
             };
             let marker = LineMarker {
@@ -539,16 +661,29 @@ pub fn line_markers(files: Option<&dyn Files>, doc: &Document) -> Vec<LineMarker
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// Files in memory, by absolute path.
-    struct MapFiles(BTreeMap<String, String>);
+    /// Files in memory, by absolute path, in the project `/p`.
+    pub(crate) struct MapFiles(BTreeMap<String, String>);
 
     impl MapFiles {
-        fn new(files: &[(&str, &str)]) -> Self {
+        pub(crate) fn new(files: &[(&str, &str)]) -> Self {
             Self(files.iter().map(|(p, t)| ((*p).to_owned(), (*t).to_owned())).collect())
+        }
+    }
+
+    /// `*` within a segment, `**` across segments (like the host's globs).
+    fn glob_match(glob: &[u8], path: &[u8]) -> bool {
+        match glob {
+            [] => path.is_empty(),
+            [b'*', b'*', b'/', rest @ ..] => glob_match(rest, path) || (!path.is_empty() && glob_match(glob, &path[1..])),
+            [b'*', b'*', rest @ ..] => (0..=path.len()).any(|i| glob_match(rest, &path[i..])),
+            [b'*', rest @ ..] => (0..=path.len())
+                .take_while(|&i| i == 0 || path[i - 1] != b'/')
+                .any(|i| glob_match(rest, &path[i..])),
+            [c, rest @ ..] => path.first() == Some(c) && glob_match(rest, &path[1..]),
         }
     }
 
@@ -557,8 +692,17 @@ mod tests {
             self.0.get(path).cloned()
         }
 
-        fn find(&self, suffix: &str) -> Option<String> {
-            self.0.keys().find(|p| p.ends_with(&format!("/{suffix}"))).cloned()
+        fn glob(&self, glob: &str, limit: u32) -> Vec<String> {
+            self.0
+                .keys()
+                .filter(|p| p.strip_prefix("/p/").is_some_and(|rel| glob_match(glob.as_bytes(), rel.as_bytes())))
+                .take(limit as usize)
+                .cloned()
+                .collect()
+        }
+
+        fn root(&self) -> &str {
+            "/p"
         }
     }
 

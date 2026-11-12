@@ -18,6 +18,11 @@ Latte is the template engine of the Nette Framework for PHP, known for its stric
   - Displays `{block ...}`, `{define ...}`, `{snippet ...}`, `{snippetArea ...}`, and `{layout ...}` in the Structure view.
   - Recognizes `n:block` and `n:snippet` attributes on HTML tags.
   - Displays nested blocks in an interactive hierarchy.
+- **Navigation (Go to Definition / ⌘-click)**:
+  - Template files in `{include 'file.latte'}`, `{layout}`, `{extends}`, `{import}`, `{embed}`, `{sandbox}` and `{include block from 'file.latte'}` — relative to the template, with a project-wide fallback.
+  - Blocks in `{include name}`, `{include #name}`, `{include block name}` and `{ifset #name}` — looked up in the template, its `{import}`s and its layout chain.
+  - Gutter icons: jump to the layout / imported templates, and from a `{block}` to the block of the layout it overrides.
+  - Needs the optional `project.read` capability for other files; without it, only blocks of the current template resolve.
 - **Code Folding**:
   - Fold block tags (`{block}...{/block}`, `{snippet}...{/snippet}`, `{if}...{/if}`, etc.).
   - Fold multi-line comments (`{* ... *}`, `<!-- ... -->`).

@@ -4,11 +4,13 @@
 mod completion;
 mod folding;
 mod lexer;
+mod navigation;
 mod outline;
 
-use openidea_plugin::providers::{CompletionItem, Document, Providers};
+use navigation::{Files, ProjectFiles};
+use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers};
 use openidea_plugin::syntax::{Fold, Symbol, SyntaxProvider, Token};
-use openidea_plugin::{Error, Invocation, Plugin, Position};
+use openidea_plugin::{Error, Invocation, Location, Plugin, Position};
 
 #[derive(Default)]
 pub struct Latte;
@@ -46,6 +48,16 @@ impl Providers for Latte {
         trigger: Option<&str>,
     ) -> Vec<CompletionItem> {
         completion::completion(doc, at, trigger)
+    }
+
+    fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        let files = ProjectFiles::for_path(&doc.path);
+        navigation::definition(files.as_ref().map(|f| f as &dyn Files), doc, at)
+    }
+
+    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        let files = ProjectFiles::for_path(&doc.path);
+        navigation::line_markers(files.as_ref().map(|f| f as &dyn Files), doc)
     }
 }
 

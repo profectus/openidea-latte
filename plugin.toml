@@ -12,11 +12,16 @@ engines.openidea = "^1.2"
 wasm = "dist/plugin.wasm"
 activation = ["on-language:latte"]
 
+[capabilities]
+# Reading other templates of the project: Go to Definition and gutter markers
+# for {include}, {layout}, {import} and blocks.
+optional = ["project.read"]
+
 [[contributes.languages]]
 path = "languages/latte.toml"
 
 [[contributes.providers]]
-kinds = ["completion"]
+kinds = ["completion", "definition", "line-markers"]
 languages = ["latte"]
 
 [[contributes.fileIcons]]

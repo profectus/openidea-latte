@@ -7,7 +7,7 @@ Latte is the template engine of the Nette Framework for PHP, known for its stric
 ## Features
 
 - **File detection**: Automatic association for `.latte` files.
-- **Syntax highlighting**:
+- **Syntax highlighting** (by the plugin's own lexer, HTML included — the language deliberately has no `ui-mode`, since the editor ignores a plugin's highlighting for languages it has a CodeMirror mode for):
   - Latte tags: `{if ...}`, `{foreach ...}`, `{block ...}`, `{var ...}`, `{dump ...}`, and more.
   - Latte modifiers / filters: `|upper`, `|truncate`, `|date`, `|noescape`, `|stripHtml`, etc.
   - Variables (`$user`, `$iterator`, `$this`) and PHP expressions.
@@ -28,6 +28,12 @@ Latte is the template engine of the Nette Framework for PHP, known for its stric
   - `{control}`, `{form}` and `<form n:name>` → `createComponent<X>()` of the presenter (or of a PHP class next to a component template).
   - Gutter icon on line 1 of a view template → its `render<X>()` / `action<X>()`; in a presenter, gutter icons on `render<X>()` / `action<X>()` → the template.
   - The automatic `@layout.latte` of a presenter template counts as its layout (blocks overriding it get a gutter icon, `{include}` finds its blocks).
+- **PHP navigation in templates** (Go to Definition):
+  - Classes: `{varType App\Model\User $u}`, `{templateType …}`, `new Foo`, `instanceof Foo`, `Foo::class`.
+  - Static members: `Foo::create()`, `Foo::BAR`, `Foo::$cache`.
+  - Members of typed variables, along chains: `$user->getAddress()->city`, `$items[0]->name`; a missing property falls back to its getter (`$user->name` → `getName()`).
+  - Variable types from `{varType}`, `{var}`, `{default}`, `{parameters}`, `{templateType}`, `{foreach … as $x}` / `n:foreach` (element types of `Foo[]`, `array<int, Foo>`, `Collection<Foo>`), `{var $x = <expression>}`, and `$presenter` / `$control` / `$user`.
+  - Classes are found through Composer (`vendor/composer/autoload_psr4.php`, `autoload_classmap.php`, or `composer.json`), so vendor classes open too; members are looked up through parents, interfaces, traits and `@property` / `@method` annotations.
 - **Code Folding**:
   - Fold block tags (`{block}...{/block}`, `{snippet}...{/snippet}`, `{if}...{/if}`, etc.).
   - Fold multi-line comments (`{* ... *}`, `<!-- ... -->`).

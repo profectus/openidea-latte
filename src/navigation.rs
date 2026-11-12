@@ -11,12 +11,16 @@
 //! Parsing works on byte offsets; [`openidea_plugin::text`] converts them to
 //! editor positions (UTF-16 columns).
 
-use crate::nette;
+use crate::php::ClassIndex;
+use crate::{latte_php, nette};
 use openidea_plugin::providers::{Document, LineMarker};
 use openidea_plugin::text;
 use openidea_plugin::{Location, Position, Project, Range};
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range as Span;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// How deep `{layout}` / `{import}` chains are followed (guards cycles too).
 const MAX_DEPTH: usize = 8;
@@ -62,6 +66,9 @@ pub struct Template {
     pub imports: Vec<String>,
     /// `{layout none}`: no automatic layout either.
     pub layout_disabled: bool,
+    /// Latte code regions: (tag, arguments) of `{tag …}` and the values of
+    /// `n:tag="…"` attributes (`n:inner-`/`n:tag-` prefixes dropped).
+    pub code: Vec<(String, Span<usize>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,9 +93,6 @@ pub fn parse(text: &str) -> Template {
     }
     t
 }
-
-/// `n:` attributes that name something: `n:block`, `n:href`, `n:name` (of a `<form>`).
-const N_ATTRS: &[&str] = &["n:block", "n:href", "n:name"];
 
 /// The value span of an HTML attribute value starting at `at` (after `=`):
 /// quoted, or bare up to whitespace or `>`. Returns (value, where to resume).
@@ -117,11 +121,17 @@ fn n_attr(text: &str, i: usize, t: &mut Template) -> Option<usize> {
     if i == 0 || !bytes[i - 1].is_ascii_whitespace() {
         return None;
     }
-    let attr = N_ATTRS.iter().find(|a| bytes[i..].starts_with(a.as_bytes()) && bytes.get(i + a.len()) == Some(&b'='))?;
-    let (value, resume) = attr_value(bytes, i + attr.len() + 1)?;
-    match *attr {
-        "n:block" => t.blocks.extend(block_def(text, value)),
-        "n:href" => {
+    let name_len = bytes[i + 2..].iter().take_while(|b| b.is_ascii_alphanumeric() || **b == b'_' || **b == b'-').count();
+    if name_len == 0 || bytes.get(i + 2 + name_len) != Some(&b'=') {
+        return None;
+    }
+    let name = &text[i + 2..i + 2 + name_len];
+    let name = name.strip_prefix("inner-").or_else(|| name.strip_prefix("tag-")).unwrap_or(name);
+    let (value, resume) = attr_value(bytes, i + 2 + name_len + 1)?;
+    t.code.push((name.to_owned(), value.clone()));
+    match name {
+        "block" => t.blocks.extend(block_def(text, value)),
+        "href" => {
             if let Some(arg) = next_arg(text, value.start, value.end)
                 && is_static(&text[arg.span.clone()])
             {
@@ -129,7 +139,7 @@ fn n_attr(text: &str, i: usize, t: &mut Template) -> Option<usize> {
                 t.refs.push(Reference { tag: "n:href".into(), target: Target::Link(dest), span: arg.span });
             }
         }
-        _ if in_form_tag(text, i) => {
+        "name" if in_form_tag(text, i) => {
             if let Some(arg) = next_arg(text, value.start, value.end)
                 && is_static(&text[arg.span.clone()])
             {
@@ -173,9 +183,14 @@ fn scan(text: &str, t: &mut Template) -> Vec<RawTag> {
 
             let name_end = inner.start + bytes[inner.clone()].iter().take_while(|b| is_name_byte(**b)).count();
             if name_end == inner.start || !bytes[inner.start].is_ascii_alphabetic() {
-                continue; // `{$var}`, `{/block}`, `{=expr}`, `{_'text'}`, …
+                // `{$var}`, `{=expr}`, `{_'text'}` are code; `{/block}` is not.
+                if bytes[inner.start] != b'/' {
+                    t.code.push((String::new(), inner));
+                }
+                continue;
             }
             let tag = RawTag { name: text[inner.start..name_end].to_owned(), args: name_end..inner.end };
+            t.code.push((tag.name.clone(), tag.args.clone()));
 
             if tag.name == "syntax" && text[tag.args.clone()].trim() == "off" {
                 // Nothing inside is Latte until `{/syntax}`.
@@ -388,6 +403,11 @@ pub trait Files {
         self.read(path).is_some()
     }
 
+    /// A cached [`ClassIndex`] of the project, if the implementation keeps one.
+    fn cached_class_index(&self) -> Option<Rc<ClassIndex>> {
+        None
+    }
+
     /// `path` relative to the root (`""` for the root itself), if inside it.
     fn relative(&self, path: &str) -> Option<String> {
         let path = normalize(path);
@@ -399,14 +419,26 @@ pub trait Files {
     }
 }
 
+/// The class index of `files`: its cached one, or a fresh one.
+pub fn class_index(files: &dyn Files) -> Rc<ClassIndex> {
+    files.cached_class_index().unwrap_or_else(|| Rc::new(ClassIndex::load(files)))
+}
+
+/// How long a project's class index is reused before Composer's maps are read again.
+const INDEX_TTL: Duration = Duration::from_secs(300);
+
+/// Class indexes by project root, kept by the plugin between calls.
+pub type IndexCache = Rc<RefCell<HashMap<String, (Instant, Rc<ClassIndex>)>>>;
+
 /// The host project containing `path`.
 pub struct ProjectFiles {
     project: Project,
     root: String,
+    cache: IndexCache,
 }
 
 impl ProjectFiles {
-    pub fn for_path(path: &str) -> Option<Self> {
+    pub fn for_path(path: &str, cache: &IndexCache) -> Option<Self> {
         let path = normalize(path);
         openidea_plugin::host::projects()
             .ok()?
@@ -415,7 +447,7 @@ impl ProjectFiles {
                 let root = normalize(&project.root().ok()?);
                 let root = root.trim_end_matches('/').to_owned();
                 let inside = path == root || path.starts_with(&format!("{root}/"));
-                inside.then_some(Self { project, root })
+                inside.then(|| Self { project, root, cache: cache.clone() })
             })
             .max_by_key(|f| f.root.len())
     }
@@ -432,6 +464,17 @@ impl Files for ProjectFiles {
 
     fn root(&self) -> &str {
         &self.root
+    }
+
+    fn cached_class_index(&self) -> Option<Rc<ClassIndex>> {
+        if let Some((at, index)) = self.cache.borrow().get(&self.root)
+            && at.elapsed() < INDEX_TTL
+        {
+            return Some(index.clone());
+        }
+        let index = Rc::new(ClassIndex::load(self));
+        self.cache.borrow_mut().insert(self.root.clone(), (Instant::now(), index.clone()));
+        Some(index)
     }
 }
 
@@ -601,13 +644,15 @@ fn target_of(files: Option<&dyn Files>, doc: &Document, template: &Template, r: 
 pub fn definition(files: Option<&dyn Files>, doc: &Document, at: Position) -> Vec<Location> {
     let Some(offset) = text::offset(&doc.text, at) else { return Vec::new() };
     let template = parse(&doc.text);
-    template
-        .refs
-        .iter()
-        .filter(|r| r.span.start <= offset && offset <= r.span.end)
-        .find_map(|r| target_of(files, doc, &template, r))
-        .into_iter()
-        .collect()
+    let mut refs = template.refs.iter().filter(|r| r.span.start <= offset && offset <= r.span.end).peekable();
+    if refs.peek().is_some() {
+        return refs.find_map(|r| target_of(files, doc, &template, r)).into_iter().collect();
+    }
+    // PHP in the template's code: classes, members, variables.
+    let Some(files) = files else { return Vec::new() };
+    let index = class_index(files);
+    let ctx = latte_php::Ctx { files, index: &index, path: &doc.path, text: &doc.text, template: &template };
+    ctx.definition(offset).into_iter().collect()
 }
 
 /// Gutter markers: the presenter (line 1), the layout and imported
@@ -903,7 +948,7 @@ pub(crate) mod tests {
         host.add_file("app/UI/@layout.latte", LAYOUT);
         host.add_file("app/UI/Home/default.latte", PAGE);
         let d = doc("/project/app/UI/Home/default.latte", PAGE);
-        let files = ProjectFiles::for_path(&d.path).expect("the mock project contains the document");
+        let files = ProjectFiles::for_path(&d.path, &IndexCache::default()).expect("the mock project contains the document");
         let menu = definition(Some(&files), &d, pos(PAGE, "{include menu", 10));
         assert_eq!(menu[0].path, "/project/app/UI/@layout.latte");
         assert_eq!(line_markers(Some(&files), &d).len(), 2);

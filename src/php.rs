@@ -713,7 +713,8 @@ pub struct ClassIndex {
     pub psr4: Vec<(String, Vec<String>)>,
     /// Class → file, loaded on first need (it can be large).
     classmap: std::cell::OnceCell<HashMap<String, String>>,
-    root: String,
+    /// The Composer project's directory.
+    pub root: String,
 }
 
 /// `'App\\Model\\' => array($baseDir . '/app/Model', …)` → strings and paths of one line.
@@ -739,8 +740,9 @@ fn autoload_line(line: &str, root: &str) -> Option<(String, Vec<String>)> {
 }
 
 impl ClassIndex {
-    pub fn load(files: &dyn Files) -> Self {
-        let root = files.root().to_owned();
+    /// The maps of the Composer project at `root` (see [`composer_root`]).
+    pub fn load(files: &dyn Files, root: &str) -> Self {
+        let root = root.to_owned();
         let mut psr4: Vec<(String, Vec<String>)> = files
             .read(&format!("{root}/vendor/composer/autoload_psr4.php"))
             .map(|text| text.lines().filter_map(|l| autoload_line(l, &root)).collect())
@@ -898,17 +900,20 @@ pub struct Found {
 
 /// `name` of `kind` in the class of `file` or the classes, interfaces and
 /// traits it inherits from. Methods ignore case; properties and constants don't.
+/// When nothing is found, says why in the IDE log.
 pub fn find_member(files: &dyn Files, index: &ClassIndex, file: PhpFile, name: &str, kind: MemberKind) -> Option<Found> {
     let receiver = file.fqcn();
+    let start = format!("{} ({})", receiver.as_deref().unwrap_or("?"), file.path);
     let mut queue = std::collections::VecDeque::from([file]);
     let mut seen: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     while let Some(current) = queue.pop_front() {
         if seen.len() > MAX_HIERARCHY {
             break;
         }
         let Some(class) = current.class.as_ref() else { continue };
-        let fqcn = current.fqcn().unwrap_or_default().to_ascii_lowercase();
-        if seen.contains(&fqcn) {
+        let fqcn = current.fqcn().unwrap_or_default();
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(&fqcn)) {
             continue;
         }
         seen.push(fqcn);
@@ -923,6 +928,12 @@ pub fn find_member(files: &dyn Files, index: &ClassIndex, file: PhpFile, name: &
             let ty = m.best_type().map(|t| parse_type(t, &resolve)).unwrap_or_default();
             return Some(Found { location: current.location(&m.span), ty });
         }
+        // The declarations may have been misread: a plain `function name(` still counts.
+        if kind == MemberKind::Method
+            && let Some(span) = raw_method(&current.text, name)
+        {
+            return Some(Found { location: current.location(&span), ty: Ty::default() });
+        }
         // Breadth: traits first (they are part of the class), then parents and interfaces.
         let related: Vec<String> = class
             .traits
@@ -932,12 +943,58 @@ pub fn find_member(files: &dyn Files, index: &ClassIndex, file: PhpFile, name: &
             .map(|n| current.resolve(n))
             .collect();
         for parent in related {
-            if let Some(f) = find_class(files, index, &parent) {
-                queue.push_back(f);
+            match find_class(files, index, &parent) {
+                Some(f) => queue.push_back(f),
+                None => missing.push(parent),
             }
         }
     }
+    let what = match kind {
+        MemberKind::Method => format!("method {name}()"),
+        MemberKind::Property => format!("property ${name}"),
+        MemberKind::Constant => format!("constant {name}"),
+    };
+    let mut msg = format!("{what} not found in {start}; searched {}", seen.join(", "));
+    if !missing.is_empty() {
+        msg.push_str(&format!("; classes not found (Composer root {}): {}", index.root, missing.join(", ")));
+    }
+    crate::diagnostic(&msg);
     None
+}
+
+/// `function name(` anywhere in `text` (PHP names ignore case).
+fn raw_method(text: &str, name: &str) -> Option<Span<usize>> {
+    let b = text.as_bytes();
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices("function").find_map(|(i, _)| {
+        if i > 0 && is_ident(b[i - 1]) {
+            return None;
+        }
+        let mut j = i + "function".len();
+        if !b.get(j).is_some_and(u8::is_ascii_whitespace) {
+            return None;
+        }
+        while j < b.len() && (b[j].is_ascii_whitespace() || b[j] == b'&') {
+            j += 1;
+        }
+        let end = j + b[j..].iter().take_while(|c| is_ident(**c)).count();
+        let after = text[end..].trim_start();
+        (text[j..end].eq_ignore_ascii_case(name) && after.starts_with('(')).then_some(j..end)
+    })
+}
+
+/// The directory of the Composer project a file belongs to: the nearest one
+/// up from it with a `composer.json` (the project root when there is none).
+pub fn composer_root(files: &dyn Files, near: &str) -> String {
+    let root = files.root().to_owned();
+    let mut dir = normalize(crate::navigation::dir_of(near));
+    while dir.len() > root.len() && dir.starts_with(&root) {
+        if files.exists(&format!("{dir}/composer.json")) {
+            return dir;
+        }
+        dir = crate::navigation::dir_of(&dir).to_owned();
+    }
+    root
 }
 
 #[cfg(test)]
@@ -1054,14 +1111,14 @@ final class User extends Entity implements Identity
             ("/p/vendor/latte/latte/src/Latte/Engine.php", "<?php namespace Latte; class Engine {}"),
             ("/p/vendor/nette/forms/src/Forms/Form.php", "<?php namespace Nette\\Forms; class Form {}"),
         ]);
-        let index = ClassIndex::load(&files);
+        let index = ClassIndex::load(&files, "/p");
         assert_eq!(index.locate(&files, "App\\Model\\User").as_deref(), Some("/p/app/Model/User.php"));
         assert_eq!(index.locate(&files, "Nette\\Forms\\Form").as_deref(), Some("/p/vendor/nette/forms/src/Forms/Form.php"));
         assert_eq!(index.locate(&files, "Latte\\Engine").as_deref(), Some("/p/vendor/latte/latte/src/Latte/Engine.php"));
         assert_eq!(find_template_class(&files, &index, "Engine").unwrap().path, "/p/vendor/latte/latte/src/Latte/Engine.php");
 
         let json = MapFiles::new(&[("/p/composer.json", r#"{"autoload": {"psr-4": {"App\\": "app/", "Lib\\": ["lib/", "src/"]}}}"#)]);
-        let index = ClassIndex::load(&json);
+        let index = ClassIndex::load(&json, "/p");
         assert_eq!(index.psr4.len(), 2);
         assert!(index.psr4.iter().any(|(p, d)| p == "Lib\\" && d == &["/p/lib", "/p/src"]));
     }
@@ -1075,7 +1132,7 @@ final class User extends Entity implements Identity
             ("/p/app/Model/Timestamps.php", "<?php namespace App\\Model; trait Timestamps { public ?\\DateTime $created; }"),
             ("/p/app/Model/Identity.php", "<?php namespace App\\Model; interface Identity { function getRoles(): array; }"),
         ]);
-        let index = ClassIndex::load(&files);
+        let index = ClassIndex::load(&files, "/p");
         let user = || find_class(&files, &index, "App\\Model\\User").unwrap();
         let get = |name: &str, kind| find_member(&files, &index, user(), name, kind);
 

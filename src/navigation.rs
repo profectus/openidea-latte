@@ -403,8 +403,9 @@ pub trait Files {
         self.read(path).is_some()
     }
 
-    /// A cached [`ClassIndex`] of the project, if the implementation keeps one.
-    fn cached_class_index(&self) -> Option<Rc<ClassIndex>> {
+    /// A cached [`ClassIndex`] of the Composer project at `root`, if the
+    /// implementation keeps them.
+    fn cached_class_index(&self, _root: &str) -> Option<Rc<ClassIndex>> {
         None
     }
 
@@ -419,9 +420,11 @@ pub trait Files {
     }
 }
 
-/// The class index of `files`: its cached one, or a fresh one.
-pub fn class_index(files: &dyn Files) -> Rc<ClassIndex> {
-    files.cached_class_index().unwrap_or_else(|| Rc::new(ClassIndex::load(files)))
+/// The class index of the Composer project `near` (a file) belongs to:
+/// cached, or read now.
+pub fn class_index(files: &dyn Files, near: &str) -> Rc<ClassIndex> {
+    let root = crate::php::composer_root(files, near);
+    files.cached_class_index(&root).unwrap_or_else(|| Rc::new(ClassIndex::load(files, &root)))
 }
 
 /// How long a project's class index is reused before Composer's maps are read again.
@@ -466,14 +469,14 @@ impl Files for ProjectFiles {
         &self.root
     }
 
-    fn cached_class_index(&self) -> Option<Rc<ClassIndex>> {
-        if let Some((at, index)) = self.cache.borrow().get(&self.root)
+    fn cached_class_index(&self, root: &str) -> Option<Rc<ClassIndex>> {
+        if let Some((at, index)) = self.cache.borrow().get(root)
             && at.elapsed() < INDEX_TTL
         {
             return Some(index.clone());
         }
-        let index = Rc::new(ClassIndex::load(self));
-        self.cache.borrow_mut().insert(self.root.clone(), (Instant::now(), index.clone()));
+        let index = Rc::new(ClassIndex::load(self, root));
+        self.cache.borrow_mut().insert(root.to_owned(), (Instant::now(), index.clone()));
         Some(index)
     }
 }
@@ -650,7 +653,7 @@ pub fn definition(files: Option<&dyn Files>, doc: &Document, at: Position) -> Ve
     }
     // PHP in the template's code: classes, members, variables.
     let Some(files) = files else { return Vec::new() };
-    let index = class_index(files);
+    let index = class_index(files, &doc.path);
     let ctx = latte_php::Ctx { files, index: &index, path: &doc.path, text: &doc.text, template: &template };
     ctx.definition(offset).into_iter().collect()
 }

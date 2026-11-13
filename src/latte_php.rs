@@ -593,4 +593,42 @@ mod tests {
         }
         let _ = Position::default();
     }
+
+    /// A Composer project in a subdirectory of the IDE project, with the
+    /// method inherited from a vendor class only Composer's class map knows.
+    #[test]
+    fn composer_project_in_a_subdirectory() {
+        let row = "<?php\n\ndeclare(strict_types=1);\n\nnamespace Web\\App\\Database;\n\nuse Nette\\Database\\Table\\ActiveRow;\n\n/**\n * @property-read int $id\n */\n#[\\AllowDynamicProperties]\nabstract class Row extends ActiveRow implements \\JsonSerializable\n{\n\tpublic function __construct(array $data, private readonly Selection $table) {}\n\n\tpublic function title(): string\n\t{\n\t\treturn match (1) { default => \"{$this->x}\" };\n\t}\n}\n";
+        let files = MapFiles::new(&[
+            ("/p/www/composer.json", "{}"),
+            ("/p/www/vendor/composer/autoload_psr4.php", "<?php\nreturn array(\n    'Web\\\\App\\\\' => array($baseDir . '/app'),\n);\n"),
+            ("/p/www/vendor/composer/autoload_classmap.php", "<?php\nreturn array(\n    'Nette\\\\Database\\\\Table\\\\ActiveRow' => $vendorDir . '/nette/database/src/Table/ActiveRow.php',\n);\n"),
+            ("/p/www/vendor/nette/database/src/Table/ActiveRow.php", "<?php\nnamespace Nette\\Database\\Table;\nclass ActiveRow { public function image(): ?ActiveRow {} public function ref(string $k): ?ActiveRow {} }"),
+            ("/p/www/app/Database/Row.php", &row),
+            ("/p/www/app/UI/x.latte", ""),
+        ]);
+        assert_eq!(php::composer_root(&files, "/p/www/app/UI/x.latte"), "/p/www");
+        let src = "{varType Web\\App\\Database\\Row $creator}\n<img src=\"{$creator->image()->ref('a')}\">{$creator->title()}";
+        let d = Document { path: "/p/www/app/UI/x.latte".into(), language: "latte".into(), version: 1, text: src.into() };
+        let go = |needle: &str| {
+            let at = text::position(src, src.find(needle).unwrap() + 1);
+            navigation::definition(Some(&files), &d, at).into_iter().next().map(|l| l.path)
+        };
+        assert_eq!(go("image").as_deref(), Some("/p/www/vendor/nette/database/src/Table/ActiveRow.php"));
+        assert_eq!(go("ref(").as_deref(), Some("/p/www/vendor/nette/database/src/Table/ActiveRow.php"));
+        assert_eq!(go("title").as_deref(), Some("/p/www/app/Database/Row.php"));
+    }
+
+    #[test]
+    fn misread_declarations_fall_back_to_the_text() {
+        // An unbalanced brace in a string the tokenizer can't see through (a
+        // heredoc with an odd terminator) hides the method from the parser.
+        let odd = "<?php namespace App; class Odd {\n public function a() { $x = <<<EOT\n{\n EOTX\n; }\n public function target(): void {}\n}";
+        let files = MapFiles::new(&[("/p/composer.json", r#"{"autoload": {"psr-4": {"App\\": "app/"}}}"#), ("/p/app/Odd.php", odd)]);
+        let src = "{varType App\\Odd $o}{$o->target()}";
+        let d = Document { path: "/p/app/x.latte".into(), language: "latte".into(), version: 1, text: src.into() };
+        let at = text::position(src, src.find("target").unwrap() + 1);
+        assert_eq!(navigation::definition(Some(&files), &d, at)[0].path, "/p/app/Odd.php");
+    }
 }
+

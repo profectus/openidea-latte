@@ -5,23 +5,30 @@
 //! mode, which is why `languages/latte.toml` sets no `ui-mode`: this lexer
 //! colours the HTML as well.
 //!
-//! Colours follow the IDE scheme's categories: tag names and `n:` attribute
-//! names are keywords, block names are function
-//! declarations, block references and components are function calls, link
-//! destinations and PHP classes are types.
+//! Colours use the categories the IDE's colour schemes actually colour
+//! (see the constants below): tag and `n:`
+//! attribute names are keywords, `$variables` purple, calls, block names and
+//! components like function declarations, filters like metadata, link
+//! destinations like numbers.
 
 use openidea_plugin::syntax::{Highlight, Token};
 
-/// Latte's built-in filters (others are custom: still highlighted, as calls).
-const LATTE_FILTERS: &[&str] = &[
-    "batch", "breakLines", "breaklines", "bytes", "capitalize", "ceil", "checkUrl", "clamp", "dataStream",
-    "datastream", "date", "escapeUrl", "explode", "filter", "first", "firstLower", "firstUpper", "floor",
-    "group", "implode", "indent", "join", "last", "length", "localDate", "lower", "number", "padLeft",
-    "padRight", "query", "random", "repeat", "replace", "replaceRE", "replaceRe", "reverse", "round", "slice",
-    "sort", "spaceless", "split", "strip", "stripHtml", "striphtml", "stripTags", "striptags", "substr",
-    "toAscii", "trim", "truncate", "upper", "webalize", "noescape", "escapeHtml", "escapeHtmlAttr",
-    "escapeJs", "escapeCss", "escapeICal", "escapeXml", "nocheck", "timeAgoInWords", "translate",
-];
+// What each part of a template is painted as. The IDE's schemes leave
+// `variable`, `function-call` and `type` in the text colour, so the parts
+// that should stand out use categories the schemes do colour.
+
+/// `$variables`.
+const VARIABLE: Highlight = Highlight::SelfVariable;
+/// Method and function calls.
+const CALL: Highlight = Highlight::Function;
+/// Filters.
+const FILTER: Highlight = Highlight::Macro;
+/// `{link}` / `n:href` destinations.
+const LINK: Highlight = Highlight::Number;
+/// Block names, block references and components.
+const NAME: Highlight = Highlight::Function;
+/// Primitive types in `{varType}` & co.
+const PRIMITIVE: Highlight = Highlight::Keyword;
 
 /// Words that are keywords inside Latte/PHP expressions.
 const KEYWORDS: &[&str] = &[
@@ -363,7 +370,7 @@ impl Lexer<'_> {
                 *i = end;
                 return self.next_first_arg(i, tag, stop);
             }
-            Highlight::Function
+            NAME
         } else if INCLUDE_TAGS.contains(&tag) || matches!(tag, "ifset" | "elseifset") {
             match word {
                 "block" | "file" => {
@@ -373,12 +380,12 @@ impl Lexer<'_> {
                 }
                 "parent" | "this" | "none" | "auto" | "false" => Highlight::Keyword,
                 w if w.contains(['.', '/']) && !w.starts_with('#') => Highlight::String,
-                _ => Highlight::FunctionCall,
+                _ => NAME,
             }
         } else if matches!(tag, "link" | "plink") {
-            Highlight::Type
+            LINK
         } else if COMPONENT_TAGS.contains(&tag) {
-            Highlight::FunctionCall
+            NAME
         } else {
             return false;
         };
@@ -464,7 +471,7 @@ impl Lexer<'_> {
                     while *i < self.b.len() && is_ident(self.b[*i]) {
                         *i += 1;
                     }
-                    let kind = if prev == Prev::Static { Highlight::Property } else { Highlight::Variable };
+                    let kind = if prev == Prev::Static { Highlight::Property } else { VARIABLE };
                     self.push(start, *i, kind);
                     prev = Prev::Other;
                 }
@@ -475,9 +482,7 @@ impl Lexer<'_> {
                     while *i < self.b.len() && is_ident(self.b[*i]) {
                         *i += 1;
                     }
-                    let name = &self.text[start..*i];
-                    let kind = if LATTE_FILTERS.contains(&name) { Highlight::Builtin } else { Highlight::FunctionCall };
-                    self.push(start, *i, kind);
+                    self.push(start, *i, FILTER);
                     prev = Prev::Other;
                 }
                 b'0'..=b'9' => {
@@ -505,18 +510,17 @@ impl Lexer<'_> {
                     let call = next == Some(b'(');
                     let lower = word.to_ascii_lowercase();
                     let kind = match prev {
-                        Prev::Arrow if call => Some(Highlight::FunctionCall),
+                        Prev::Arrow if call => Some(CALL),
                         Prev::Arrow => Some(Highlight::Property),
-                        Prev::Static if call => Some(Highlight::FunctionCall),
+                        Prev::Static if call => Some(CALL),
                         Prev::Static => Some(Highlight::Constant),
                         Prev::Class => Some(Highlight::Type),
                         Prev::Other if word.contains('\\') => Some(Highlight::Type),
                         Prev::Other if self.b[*i..].starts_with(b"::") => Some(Highlight::Type),
-                        Prev::Other if types && !call && (PRIMITIVES.contains(&lower.as_str()) || word.starts_with(char::is_uppercase)) => {
-                            Some(Highlight::Type)
-                        }
+                        Prev::Other if types && !call && PRIMITIVES.contains(&lower.as_str()) => Some(PRIMITIVE),
+                        Prev::Other if types && !call && word.starts_with(char::is_uppercase) => Some(Highlight::Type),
                         Prev::Other if KEYWORDS.contains(&lower.as_str()) => Some(Highlight::Keyword),
-                        Prev::Other if call => Some(Highlight::FunctionCall),
+                        Prev::Other if call => Some(CALL),
                         Prev::Other if word.len() > 1 && word.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => {
                             Some(Highlight::Constant)
                         }
@@ -598,20 +602,20 @@ mod tests {
         for name in ["define", "/define", "control", "ifcontent", "/ifcontent", "do", "_", "translate"] {
             assert_eq!(kind_of(src, name), Some(Highlight::Keyword), "{name}");
         }
-        assert_eq!(kind_of(src, "menu"), Some(Highlight::Function));
-        assert_eq!(kind_of(src, "cart"), Some(Highlight::FunctionCall));
+        assert_eq!(kind_of(src, "menu"), Some(NAME));
+        assert_eq!(kind_of(src, "cart"), Some(NAME));
     }
 
     #[test]
     fn names_in_arguments() {
         let src = "{include 'parts/menu.latte'}{include #footer}{include block sidebar}{layout none}{link Product:show $id}{form signIn}{embed card.latte}";
         assert_eq!(kind_of(src, "'parts/menu.latte'"), Some(Highlight::String));
-        assert_eq!(kind_of(src, "#footer"), Some(Highlight::FunctionCall));
-        assert_eq!(kind_of(src, "sidebar"), Some(Highlight::FunctionCall));
+        assert_eq!(kind_of(src, "#footer"), Some(NAME));
+        assert_eq!(kind_of(src, "sidebar"), Some(NAME));
         assert_eq!(kind_of(src, "none"), Some(Highlight::Keyword));
-        assert_eq!(kind_of(src, "Product:show"), Some(Highlight::Type));
-        assert_eq!(kind_of(src, "$id"), Some(Highlight::Variable));
-        assert_eq!(kind_of(src, "signIn"), Some(Highlight::FunctionCall));
+        assert_eq!(kind_of(src, "Product:show"), Some(LINK));
+        assert_eq!(kind_of(src, "$id"), Some(VARIABLE));
+        assert_eq!(kind_of(src, "signIn"), Some(NAME));
         assert_eq!(kind_of(src, "card.latte"), Some(Highlight::String));
     }
 
@@ -619,17 +623,30 @@ mod tests {
     fn php_expressions() {
         let src = r"{varType App\Model\User $user}{var int $n = 1}{if $user instanceof Admin && Foo::BAR > 0}{=Strings::lower($x->name)}{$item?->getPrice()|number:2|myFilter}{/if}";
         assert_eq!(kind_of(src, r"App\Model\User"), Some(Highlight::Type));
-        assert_eq!(kind_of(src, "int"), Some(Highlight::Type));
+        assert_eq!(kind_of(src, "int"), Some(PRIMITIVE));
         assert_eq!(kind_of(src, "Admin"), Some(Highlight::Type));
         assert_eq!(kind_of(src, "Foo"), Some(Highlight::Type));
         assert_eq!(kind_of(src, "BAR"), Some(Highlight::Constant));
         assert_eq!(kind_of(src, "Strings"), Some(Highlight::Type));
-        assert_eq!(kind_of(src, "lower"), Some(Highlight::FunctionCall));
+        assert_eq!(kind_of(src, "lower"), Some(CALL));
         assert_eq!(kind_of(src, "name"), Some(Highlight::Property));
-        assert_eq!(kind_of(src, "getPrice"), Some(Highlight::FunctionCall));
-        assert_eq!(kind_of(src, "number"), Some(Highlight::Builtin));
-        assert_eq!(kind_of(src, "myFilter"), Some(Highlight::FunctionCall));
+        assert_eq!(kind_of(src, "getPrice"), Some(CALL));
+        assert_eq!(kind_of(src, "number"), Some(FILTER));
+        assert_eq!(kind_of(src, "myFilter"), Some(FILTER));
         assert_eq!(kind_of(src, "instanceof"), Some(Highlight::Keyword));
+    }
+
+    #[test]
+    fn variables_and_calls_are_coloured() {
+        let src = "{if count($items) > 0}{$creator->image()|noescape}{/if}";
+        assert_eq!(kind_of(src, "count"), Some(CALL));
+        assert_eq!(kind_of(src, "$items"), Some(VARIABLE));
+        assert_eq!(kind_of(src, "$creator"), Some(VARIABLE));
+        assert_eq!(kind_of(src, "image"), Some(CALL));
+        assert_eq!(kind_of(src, "noescape"), Some(FILTER));
+        for kind in [VARIABLE, CALL, FILTER, LINK, NAME] {
+            assert!(!matches!(kind, Highlight::Variable | Highlight::FunctionCall | Highlight::Type), "uncoloured by the IDE's schemes");
+        }
     }
 
     #[test]
@@ -638,11 +655,11 @@ mod tests {
         assert_eq!(kind_of(src, "<div"), Some(Highlight::Tag));
         assert_eq!(kind_of(src, "class"), Some(Highlight::Attribute));
         assert_eq!(kind_of(src, "\"box "), Some(Highlight::String));
-        assert_eq!(kind_of(src, "$cls"), Some(Highlight::Variable));
+        assert_eq!(kind_of(src, "$cls"), Some(VARIABLE));
         assert_eq!(kind_of(src, "n:if"), Some(Highlight::Keyword));
-        assert_eq!(kind_of(src, "$show"), Some(Highlight::Variable));
-        assert_eq!(kind_of(src, "Home:default"), Some(Highlight::Type));
-        assert_eq!(kind_of(src, "signIn"), Some(Highlight::FunctionCall));
+        assert_eq!(kind_of(src, "$show"), Some(VARIABLE));
+        assert_eq!(kind_of(src, "Home:default"), Some(LINK));
+        assert_eq!(kind_of(src, "signIn"), Some(NAME));
         assert_eq!(kind_of(src, "&nbsp;"), Some(Highlight::Escape));
         assert_eq!(kind_of(src, "</form"), Some(Highlight::Tag));
     }
@@ -650,7 +667,7 @@ mod tests {
     #[test]
     fn scripts_and_syntax_off() {
         let src = "<script>var o = { a: 1 }; if (x) { y() }\nlet u = {$url};</script>{syntax off}{notATag}{/syntax}";
-        assert_eq!(kind_of(src, "$url"), Some(Highlight::Variable));
+        assert_eq!(kind_of(src, "$url"), Some(VARIABLE));
         assert!(kind_of(src, "a").is_none(), "JS is plain text");
         assert_eq!(kind_of(src, "</script"), Some(Highlight::Tag));
         assert!(kind_of(src, "notATag").is_none());

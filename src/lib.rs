@@ -15,6 +15,14 @@ use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers
 use openidea_plugin::syntax::{Fold, Symbol, SyntaxProvider, Token};
 use openidea_plugin::{Error, Invocation, Location, Plugin, Position};
 
+/// Explains in the IDE log (Help › Show Log) why a lookup found nothing.
+pub(crate) fn diagnostic(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    openidea_plugin::host::log(openidea_plugin::LogLevel::Info, &format!("Go to Definition: {message}"));
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = message;
+}
+
 #[derive(Default)]
 pub struct Latte {
     /// Composer class maps by project, reused between editor requests.
@@ -177,13 +185,13 @@ mod tests {
         assert_eq!(find_kind("<div"), Some(Highlight::Tag));
         assert_eq!(find_kind("id="), Some(Highlight::Attribute));
         assert_eq!(find_kind("n:if="), Some(Highlight::Keyword));
-        assert_eq!(find_kind("$user"), Some(Highlight::Variable));
-        assert_eq!(find_kind("isLoggedIn"), Some(Highlight::FunctionCall));
+        assert_eq!(find_kind("$user"), Some(Highlight::SelfVariable));
+        assert_eq!(find_kind("isLoggedIn"), Some(Highlight::Function));
         assert_eq!(find_kind("n:block="), Some(Highlight::Keyword));
         assert_eq!(find_kind("n:foreach="), Some(Highlight::Keyword));
-        assert_eq!(find_kind("$iterator"), Some(Highlight::Variable));
-        assert_eq!(find_kind("isFirst"), Some(Highlight::FunctionCall));
-        assert_eq!(find_kind("truncate"), Some(Highlight::Builtin));
+        assert_eq!(find_kind("$iterator"), Some(Highlight::SelfVariable));
+        assert_eq!(find_kind("isFirst"), Some(Highlight::Function));
+        assert_eq!(find_kind("truncate"), Some(Highlight::Macro));
     }
 
     #[test]

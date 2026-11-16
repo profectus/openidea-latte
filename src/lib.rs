@@ -3,15 +3,31 @@
 
 mod completion;
 mod folding;
+mod latte_php;
 mod lexer;
+mod navigation;
+mod nette;
 mod outline;
+mod php;
 
-use openidea_plugin::providers::{CompletionItem, Document, Providers};
+use navigation::{Files, IndexCache, ProjectFiles};
+use openidea_plugin::providers::{CompletionItem, Document, LineMarker, Providers};
 use openidea_plugin::syntax::{Fold, Symbol, SyntaxProvider, Token};
-use openidea_plugin::{Error, Invocation, Plugin, Position};
+use openidea_plugin::{Error, Invocation, Location, Plugin, Position};
+
+/// Explains in the IDE log (Help › Show Log) why a lookup found nothing.
+pub(crate) fn diagnostic(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    openidea_plugin::host::log(openidea_plugin::LogLevel::Info, &format!("Go to Definition: {message}"));
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = message;
+}
 
 #[derive(Default)]
-pub struct Latte;
+pub struct Latte {
+    /// Composer class maps by project, reused between editor requests.
+    indexes: IndexCache,
+}
 
 impl Plugin for Latte {
     fn run_command(
@@ -46,6 +62,25 @@ impl Providers for Latte {
         trigger: Option<&str>,
     ) -> Vec<CompletionItem> {
         completion::completion(doc, at, trigger)
+    }
+
+    fn definition(&mut self, doc: &Document, at: Position) -> Vec<Location> {
+        if doc.language != "latte" {
+            return Vec::new();
+        }
+        let files = ProjectFiles::for_path(&doc.path, &self.indexes);
+        navigation::definition(files.as_ref().map(|f| f as &dyn Files), doc, at)
+    }
+
+    fn line_markers(&mut self, doc: &Document) -> Vec<LineMarker> {
+        let files = ProjectFiles::for_path(&doc.path, &self.indexes);
+        let files = files.as_ref().map(|f| f as &dyn Files);
+        match doc.language.as_str() {
+            "latte" => navigation::line_markers(files, doc),
+            // Presenters: from render<X>() / action<X>() to their templates.
+            "php" => files.map(|f| nette::presenter_markers(f, doc)).unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -141,22 +176,22 @@ mod tests {
         };
 
         assert_eq!(find_kind("{layout"), Some(Highlight::Tag));
-        assert_eq!(find_kind("layout"), Some(Highlight::Macro));
+        assert_eq!(find_kind("layout"), Some(Highlight::Keyword));
         assert_eq!(find_kind("{* Komentář"), Some(Highlight::Comment));
         assert_eq!(find_kind("<!-- Běžný"), Some(Highlight::Comment));
         assert_eq!(find_kind("{block"), Some(Highlight::Tag));
-        assert_eq!(find_kind("block"), Some(Highlight::Macro));
+        assert_eq!(find_kind("block"), Some(Highlight::Keyword));
         assert_eq!(find_kind("content"), Some(Highlight::Function));
         assert_eq!(find_kind("<div"), Some(Highlight::Tag));
         assert_eq!(find_kind("id="), Some(Highlight::Attribute));
-        assert_eq!(find_kind("n:if="), Some(Highlight::Attribute));
-        assert_eq!(find_kind("$user"), Some(Highlight::Variable));
-        assert_eq!(find_kind("isLoggedIn"), Some(Highlight::FunctionCall));
-        assert_eq!(find_kind("n:block="), Some(Highlight::Attribute));
-        assert_eq!(find_kind("n:foreach="), Some(Highlight::Attribute));
+        assert_eq!(find_kind("n:if="), Some(Highlight::Keyword));
+        assert_eq!(find_kind("$user"), Some(Highlight::SelfVariable));
+        assert_eq!(find_kind("isLoggedIn"), Some(Highlight::Function));
+        assert_eq!(find_kind("n:block="), Some(Highlight::Keyword));
+        assert_eq!(find_kind("n:foreach="), Some(Highlight::Keyword));
         assert_eq!(find_kind("$iterator"), Some(Highlight::SelfVariable));
-        assert_eq!(find_kind("isFirst"), Some(Highlight::FunctionCall));
-        assert_eq!(find_kind("truncate"), Some(Highlight::Builtin));
+        assert_eq!(find_kind("isFirst"), Some(Highlight::Function));
+        assert_eq!(find_kind("truncate"), Some(Highlight::Macro));
     }
 
     #[test]
